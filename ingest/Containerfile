@@ -1,0 +1,14 @@
+FROM localhost/dsd-fme:latest
+
+# Install runtime shared libraries
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	python3 \
+	python3-requests \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY parser.py /app/parser.py
+COPY entry.sh /app/entry.sh
+
+WORKDIR /app
+
+ENTRYPOINT ["./entry.sh"]
