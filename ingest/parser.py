@@ -1,6 +1,5 @@
-
-"""
-podman run --rm -it --privileged --security-opt label=disable --device /dev/bus/usb -v /dev/bus/usb:/dev/bus/usb -v ./logs/events.log:/tmp/events.log -v ./channel_map.csv:/data/channel_map.csv --net=host \ 
+r"""
+podman run --rm -it --privileged --security-opt label=disable --device /dev/bus/usb -v /dev/bus/usb:/dev/bus/usb -v ./logs/events.log:/tmp/events.log -v ./channel_map.csv:/data/channel_map.csv --net=host \
   dsd -ft -ma -T -C /data/channel_map.csv -i rtl:0:856.5865M:0:0 -o null -J /tmp/events.log
 """
 
@@ -12,94 +11,209 @@ Data is in this format
 """
 
 import sys
+import re
+import time
 import requests
+from datetime import datetime, timezone
 
 class DSDParser:
-    def __init__(self, opensearch_addr="127.0.0.1", opensearch_port="5601"):
-        self.opensearch_addr=opensearch_addr
-        self.opensearch_port=opensearch_port
-        self.opensearch_url = f"http://{self.opensearch_addr}:{self.opensearch_port}"
+    def __init__(self, opensearch_url="http://127.0.0.1:9200"):
+        self.opensearch_url = opensearch_url
+        self.valid = False
+        self.session = requests.Session()
 
     """
-    0: "2026-09-26 01:45:45 P25p2 TGT: 00000318"
-    1: "SRC: 05544753"
-    2: "NAC: 6E1"
-    3: "NET_STS: BEE00:6EB:1.1"
-    4: "Group"
-    5: "SName: SP-275-CARLSON"
-    6: "Mode: D"
+    Connect to the opensearch instance
     """
+    def connect(self):
+        if self.valid:
+            return True
+
+        # Wait until opensearch is up
+        if not self._wait_for_opensearch():
+            print("[ERROR] Failed to connect to opensearch", file=sys.stderr)
+            return False
+
+        # Set up indices
+        # 1. messages index:
+        messages_url = f"{self.opensearch_url}/messages"
+        r = self.session.head(messages_url)
+        if r.status_code != 200:
+            mapping = {
+                "mappings": {
+                    "properties": {
+                        "@timestamp": {"type": "date"},
+                        "protocol": {"type": "keyword"},
+                        "talkgroup": {"type": "keyword"},
+                        "source": {"type": "keyword"},
+                        "nac": {"type": "keyword"},
+                        "network_status": {"type": "keyword"},
+                        "call_type": {"type": "keyword"},
+                        "shortname": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+                        "mode": {"type": "keyword"},
+                        "encrypted": {"type": "boolean"},
+                        "slot": {"type": "integer"},
+                        "key_id": {"type": "keyword"},
+                        "algorithm_id": {"type": "keyword"},
+                    }
+                }
+            }
+            create_resp = self.session.put(messages_url, json=mapping, timeout=5)
+            create_resp.raise_for_status()
+
+        # 2. aliases index (with nested FQ_SUID mapping):
+        aliases_url = f"{self.opensearch_url}/aliases"
+        r_alias = self.session.head(aliases_url)
+        if r_alias.status_code != 200:
+            aliases_mapping = {
+                "mappings": {
+                    "properties": {
+                        "@timestamp": {"type": "date"},
+                        "talker_alias": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+                        "FQ_SUID": {
+                            "properties": {
+                                "WACN": {"type": "keyword"},
+                                "SYSID": {"type": "keyword"},
+                                "SUBID": {"type": "keyword"},
+                                "SRC": {"type": "keyword"},
+                            }
+                        }
+                    }
+                }
+            }
+            create_resp = self.session.put(aliases_url, json=aliases_mapping, timeout=5)
+            create_resp.raise_for_status()
+
+        self.valid = True
+        return True
+
+    def _wait_for_opensearch(self):
+        print("Waiting for OpenSearch to come online...", file=sys.stderr)
+        for _ in range(60):
+            try:
+                r = self.session.get(self.opensearch_url, timeout=3)
+                if r.status_code == 200:
+                    return True
+            except requests.RequestException:
+                pass
+            time.sleep(2)
+
+        return False
+
     def read_line(self, line):
         data = {"message": {}, "FQ_SUID": {}}
+        raw = line.strip()
+        if not raw:
+            return
+
+        # Skip initialization / banner messages
+        if "DSD-FME Started" in raw or "Any decoded voice calls" in raw:
+            return
+
         try:
-            for idx, chunk in enumerate(line.split("; ")):
-                sentence = chunk.split(" ")
+            # Case 1: Talker Alias and FQ-SUID line
+            # Example: Talker Alias: SP-5025-BALMER;  FQ-SUID: BEE00:6EB.549B7F (5544831);
+            if "Talker Alias:" in raw or "FQ-SUID:" in raw:
+                alias_match = re.search(r"Talker Alias:\s*([^;]+);", raw)
+                fq_match = re.search(r"FQ-SUID:\s*([^;]+);", raw)
 
-                if (len(chunk) == 0 or chunk == " "): 
-                    continue
+                fq_dict = {}
+                if fq_match:
+                    fq_raw = fq_match.group(1).strip()
+                    m = re.match(r"([0-9A-Fa-f]+):([0-9A-Fa-f]+)\.([0-9A-Fa-f]+)\s+\((\d+)\)", fq_raw)
+                    if m:
+                        fq_dict = {
+                            "WACN": m.group(1),
+                            "SYSID": m.group(2),
+                            "SUBID": m.group(3),
+                            "SRC": m.group(4)
+                        }
 
-                if chunk[0] == ' ':
-                    if idx == 1: # We have a talker alias, process separately
-                        FQ_SUID = {"WACN": sentence[2].split(':')[0],
-                                   "SYSID": sentence[2].split(':')[1].split('.')[0],
-                                   "SUBID": sentence[2].split(':')[1].split('.')[1],
-                                   "SRC": sentence[3][1:-1]
-                                   }
-                        data["FQ_SUID"] = FQ_SUID
-                    continue
-                elif idx == 0 and sentence[0] != ' ': # Timestamp info + TGT
-                    data["message"]["date"] = sentence[0]
-                    data["message"]["time"] = sentence[1]
-                    data["message"]["TGT"]  = sentence[4] # Talkgroup ID
-                elif "SRC" in sentence[0]: # Source ID
-                    data["message"]["SRC"] = int(sentence[1])
-                elif "NAC" in sentence[0]:
-                    data["message"]["NAC"] = sentence[1]
-                elif "NET_STS" in sentence[0]:
-                    data["message"]["NET_STS"] = sentence[1]
-                elif "Group" in sentence[0]:
-                    data["message"]["call_type"] = sentence[0] # e.g. Group for a group call
-                elif "ENC" in sentence[0]:
-                    data["message"]["call_type"] = sentence[0] # e.g. ENC for an encrypted call
-                elif "SName" in sentence[0]:
-                    data["message"]["SName"] = sentence[1]
-                elif "Mode" in sentence[0]:
-                    data["message"]["Mode"] = sentence[1]
-                elif "KID" in sentence[0]:
-                    data["message"]["KID"] = sentence[1]
-                elif "ALG" in sentence[0]:
-                    data["message"]["ALG"] = sentence[1]
-                else:
-                    print(f"[ERROR] Couldn't handle sentence f{sentence}")
+                data["FQ_SUID"] = {
+                    "@timestamp": datetime.now(timezone.utc).isoformat(),
+                    "talker_alias": alias_match.group(1).strip() if alias_match else None,
+                    "FQ_SUID": fq_dict
+                }
+
+            # Case 2: Event message line
+            else:
+                chunks = [c.strip() for c in line.split(";") if c.strip()]
+                if not chunks:
+                    return
+
+                first = chunks[0].split()
+                if len(first) >= 5 and first[3] == "TGT:":
+                    data["message"]["date"] = first[0]
+                    data["message"]["time"] = first[1]
+                    data["message"]["@timestamp"] = self._convert_time(first[0], first[1]).isoformat()
+                    data["message"]["protocol"] = first[2]
+                    data["message"]["talkgroup"] = first[4]
+                    data["message"]["encrypted"] = False
+
+                    for chunk in chunks[1:]:
+                        if chunk == "ENC":
+                            data["message"]["encrypted"] = True
+                            data["message"]["call_type"] = "ENC"
+                        elif chunk == "Group":
+                            data["message"]["call_type"] = "Group"
+                        elif chunk.startswith("Slot "):
+                            data["message"]["slot"] = int(chunk.split()[1])
+                        elif ":" in chunk:
+                            key, val = chunk.split(":", 1)
+                            key, val = key.strip(), val.strip()
+                            if key == "SRC":
+                                data["message"]["source"] = val
+                            elif key == "NAC":
+                                data["message"]["nac"] = val
+                            elif key == "NET_STS":
+                                data["message"]["network_status"] = val
+                            elif key == "SName":
+                                data["message"]["shortname"] = val
+                            elif key == "Mode":
+                                data["message"]["mode"] = val
+                            elif key == "KID":
+                                data["message"]["key_id"] = val
+                            elif key == "ALG":
+                                data["message"]["algorithm_id"] = val
+                            else:
+                                print(f"[ERROR] Couldn't handle chunk: {chunk}", file=sys.stderr)
+
         except Exception as e:
-            print(f"[WARN] Failed to parse line\n{line}\n{e}")
-        # Send the data to opensearch
-        try:
-            self._send(data)
-        except requests.exceptions.RequestException as e:
-            print(f"[WARN] Failed uploading to opensearch\n{e}")
+            print(f"[WARN] Failed to parse line\n{line}\n{e}", file=sys.stderr)
 
-    """
-    Send data to opensearch
-    expects a dict data of format
-    {"message": {}, "FQ_SUID": {}}
-    where there would be some info in those, if applicable.
-    message and FQ_SUID are mutually exclusive
-    """
+        # Send the data to opensearch
+        if self.valid:
+            try:
+                self._send(data)
+            except requests.exceptions.RequestException as e:
+                print(f"[WARN] Failed uploading to opensearch\n{e}", file=sys.stderr)
+        else:
+            # Fallback output when running offline / dry-run
+            if len(data["message"]) > 0:
+                print(f"[EVENT] {data['message']}")
+            if len(data["FQ_SUID"]) > 0:
+                print(f"[ALIAS] {data['FQ_SUID']}")
+
+    def _convert_time(self, date, time_val):
+        dt_str = f"{date} {time_val}"
+        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+        return dt.replace(tzinfo=timezone.utc)
+
     def _send(self, data):
-        print(data)
-        url = f"{self.opensearch_url}"
         if len(data["message"]) > 0:
-            requests.post(f"{self.opensearch_url}/messages/_doc", data["message"])
+            resp = self.session.post(f"{self.opensearch_url}/messages/_doc", json=data["message"], timeout=5)
+            resp.raise_for_status()
         if len(data["FQ_SUID"]) > 0:
-            requests.post(f"{self.opensearch_url}/aliases/_doc", data["FQ_SUID"])
+            resp = self.session.post(f"{self.opensearch_url}/aliases/_doc", json=data["FQ_SUID"], timeout=5)
+            resp.raise_for_status()
 
 if __name__ == "__main__":
-    # Initialize the parser
     parser = DSDParser()
+    # Attempt to connect and initialize indices; if offline, dry-run parsing to stdout
+    parser.connect()
 
-    # We need to read lines from stdin and pass them over to opensearch
     for line in sys.stdin:
         clean_line = line.rstrip('\n')
         parser.read_line(clean_line)
+
 
