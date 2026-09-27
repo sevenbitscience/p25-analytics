@@ -6,8 +6,20 @@ PIPE="/tmp/dsd_json.fifo"
 rm -f "$PIPE"
 mkfifo "$PIPE"
 
+# Trap SIGTERM and SIGINT to gracefully terminate children and clean up
+cleanup() {
+    echo "Caught stop signal, terminating processes..."
+    kill -TERM "$PYTHON_PID" 2>/dev/null || true
+    kill -TERM "$DSD_PID" 2>/dev/null || true
+    wait "$PYTHON_PID" 2>/dev/null || true
+    wait "$DSD_PID" 2>/dev/null || true
+    rm -f "$PIPE"
+    exit 0
+}
+trap cleanup TERM INT
+
 # 1. Start the Python ingestion consumer in the background reading from the FIFO
-python3 -u /app/ingest.py < "$PIPE" &
+python3 -u /app/parser.py < "$PIPE" &
 PYTHON_PID=$!
 
 FREQ="${FREQ:-856.5865M}"
@@ -18,10 +30,12 @@ if [ -n "$CHAN_MAP" ]; then
     CHAN_MAP_ARGS="-C $CHAN_MAP"
 fi
 
-# 2. Run dsd-fme writing its JSON directly to the FIFO
+# 2. Run dsd-fme in the background writing its JSON directly to the FIFO
 # Discard console visual logs to /dev/null if desired
-dsd-fme -ft -ma -T $CHAN_MAP_ARGS -i rtl:0:$FREQ:0:0 -o null -J "$PIPE" > /dev/null
+dsd-fme -ft -ma -T $CHAN_MAP_ARGS -i rtl:0:$FREQ:0:0 -o null -J "$PIPE" > /dev/null &
+DSD_PID=$!
 
-# Clean up
-wait $PYTHON_PID
-rm -f "$PIPE"
+# Wait for dsd-fme; when SIGTERM arrives, wait is interrupted and triggers cleanup
+wait "$DSD_PID"
+cleanup
+
