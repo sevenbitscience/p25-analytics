@@ -1,0 +1,81 @@
+########################################
+# Build process
+########################################
+
+FROM debian:bookworm-slim AS builder
+
+# Install all build-time dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    make \
+    pkg-config \
+    git \
+    libusb-1.0-0-dev \
+    libpulse-dev \
+    libsndfile1-dev \
+    libfftw3-dev \
+    liblapack-dev \
+    libncurses-dev \
+    libcodec2-dev \
+    socat \
+    ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Build librtlsdr.o
+WORKDIR /workspace
+RUN git clone https://github.com/rtlsdrblog/rtl-sdr-blog /workspace/rtl-sdr-blog
+WORKDIR /workspace/rtl-sdr-blog
+RUN mkdir build && cd build && \
+	cmake ../ -DINSTALL_UDEV_RULES=ON && \
+    make -j$(nproc) && \
+    make install
+
+# Build mbelib
+WORKDIR /workspace
+RUN git clone https://github.com/lwvmobile/mbelib /workspace/mbelib
+WORKDIR /workspace/mbelib
+RUN mkdir build && cd build && \
+    cmake .. && \
+    make -j$(nproc) && \
+    make install
+
+# Build dsd-fme
+WORKDIR /workspace
+RUN git clone https://github.com/lwvmobile/dsd-fme /workspace/dsd-fme
+WORKDIR /workspace/dsd-fme
+RUN mkdir build && cd build && \
+    cmake .. && \
+    make -j$(nproc) && \
+    make install
+
+RUN ldconfig
+
+########################################
+# Runtime
+########################################
+
+FROM debian:bookworm-slim
+
+# Install runtime shared libraries
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpulse0 \
+    libsndfile1 \
+    libfftw3-bin \
+    liblapack3 \
+    libusb-1.0-0 \
+    libncurses6 \
+	libncursesw6 \
+    libcodec2-1.0 \
+    socat \
+    ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Copy over shared libraries
+COPY --from=builder /usr/local /usr/local
+
+RUN ldconfig
+
+WORKDIR /app
+
+ENTRYPOINT ["dsd-fme"]
