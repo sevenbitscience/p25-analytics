@@ -203,9 +203,11 @@ class DSDParser:
         if len(data["message"]) > 0:
             resp = self.session.post(f"{self.opensearch_url}/messages/_doc", json=data["message"], timeout=5)
             resp.raise_for_status()
+            print(f"[INGEST] Indexed message TG:{data['message'].get('talkgroup')} SRC:{data['message'].get('source')} ({data['message'].get('protocol')})", file=sys.stderr)
         if len(data["FQ_SUID"]) > 0:
             resp = self.session.post(f"{self.opensearch_url}/aliases/_doc", json=data["FQ_SUID"], timeout=5)
             resp.raise_for_status()
+            print(f"[INGEST] Indexed alias: {data['FQ_SUID'].get('talker_alias')}", file=sys.stderr)
 
 if __name__ == "__main__":
     parser = DSDParser()
