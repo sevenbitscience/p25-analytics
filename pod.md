@@ -51,18 +51,20 @@ podman build -t dsd-ingest .
 
 tbd opensearch security
 
+Also make a storage volume for opensearch
+
 ```
-podman pod create --name p25-analytics -p 127.0.0.1:5601:5601
-# maybe podman pod create --name p25-analytics -p 5601:5601
+podman pod create --name p25-analytics -p 5601:5601
+podman volume create opensearch-data
 
-podman run -d --pod p25-analytics --name opensearch-core -e "discovery.type=single-node" -e "DISABLE_SECURITY_PLUGIN=true" --replace docker.io/opensearchproject/opensearch
-podman run -d --pod p25-analytics --name opensearch-dashboards --replace -e "SERVER_HOST=127.0.0.1" -e "DISABLE_SECURITY_DASHBOARDS_PLUGIN=true" docker.io/opensearchproject/opensearch-dashboards
-podman run -d --pod p25-analytics --privileged --security-opt label=disable --device /dev/bus/usb -v /dev/bus/usb:/dev/bus/usb -v ~/Documents/p25-analytics/channel_map.csv:/data/channel_map.csv -e FREQ=856.5865M -e CHAN_MAP=/data/channel_map.csv dsd-ingest:latest
+
+podman run -d --pod p25-analytics --name opensearch-core -e "discovery.type=single-node" -e "DISABLE_SECURITY_PLUGIN=true" docker.io/opensearchproject/opensearch
+podman run -d --pod p25-analytics --name opensearch-dashboards --replace -e "SERVER_HOST=0.0.0.0" -e "DISABLE_SECURITY_DASHBOARDS_PLUGIN=true" docker.io/opensearchproject/opensearch-dashboards
+podman run -d --pod p25-analytics --name dsd-ingest --privileged --security-opt label=disable --device /dev/bus/usb -v /dev/bus/usb:/dev/bus/usb -v ~/p25-analytics/channel_map.csv:/data/channel_map.csv -e FREQ=856.59M -e CHAN_MAP=/data/channel_map.csv dsd-ingest:latest
 ```
 
-Should work?
+Should work
+Tested for a day or so on the laptop
+tbd deployment on the server.
 
-Eventually will include 3 containers
-- dsd-fme + custom parser
-- opensearch
-- opensearch-dashboards
+tbd make it persistent across reboots.
